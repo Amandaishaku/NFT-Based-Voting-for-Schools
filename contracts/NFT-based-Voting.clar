@@ -16,6 +16,9 @@
 (define-constant err-invalid-vote (err u105))
 (define-constant err-proposal-active (err u106))
 (define-constant err-insufficient-votes (err u107))
+(define-constant err-self-delegation (err u108))
+(define-constant err-delegate-not-found (err u109))
+(define-constant err-delegation-loop (err u110))
 
 (define-data-var last-token-id uint u0)
 (define-data-var proposal-counter uint u0)
@@ -47,6 +50,19 @@
     school: (string-ascii 50),
     registered-block: uint
   }
+)
+
+(define-map delegations
+  principal
+  {
+    delegate: principal,
+    delegated-block: uint
+  }
+)
+
+(define-map delegation-power
+  principal
+  uint
 )
 
 (define-public (get-last-token-id)
@@ -119,6 +135,7 @@
       (proposal (unwrap! (map-get? proposals proposal-id) err-proposal-not-found))
       (voter tx-sender)
       (current-block stacks-block-height)
+      (vote-power (+ u1 (default-to u0 (map-get? delegation-power voter))))
     )
     (asserts! (is-eq (some voter) (nft-get-owner? school-voter-nft token-id)) err-not-token-owner)
     (asserts! (>= current-block (get start-block proposal)) err-voting-ended)
@@ -129,8 +146,8 @@
     (map-set votes {proposal-id: proposal-id, voter: voter} {vote: vote, token-id: token-id})
     
     (if vote
-      (map-set proposals proposal-id (merge proposal {yes-votes: (+ (get yes-votes proposal) u1)}))
-      (map-set proposals proposal-id (merge proposal {no-votes: (+ (get no-votes proposal) u1)}))
+      (map-set proposals proposal-id (merge proposal {yes-votes: (+ (get yes-votes proposal) vote-power)}))
+      (map-set proposals proposal-id (merge proposal {no-votes: (+ (get no-votes proposal) vote-power)}))
     )
     (ok true)
   )
@@ -252,6 +269,71 @@
       err-proposal-not-found
     )
   )
+)
+
+(define-public (delegate-vote (delegate principal))
+  (let
+    (
+      (delegator tx-sender)
+      (current-power (default-to u0 (map-get? delegation-power delegate)))
+    )
+    (asserts! (not (is-eq delegator delegate)) err-self-delegation)
+    (asserts! (> (get-voter-token-count delegator) u0) err-not-token-owner)
+    (asserts! (is-some (map-get? voter-info delegate)) err-delegate-not-found)
+    
+    (match (map-get? delegations delegator)
+      existing-delegation 
+        (let
+          (
+            (old-delegate (get delegate existing-delegation))
+            (old-power (default-to u0 (map-get? delegation-power old-delegate)))
+          )
+          (if (> old-power u0)
+            (map-set delegation-power old-delegate (- old-power u1))
+            true
+          )
+        )
+      true
+    )
+    
+    (map-set delegations delegator {
+      delegate: delegate,
+      delegated-block: stacks-block-height
+    })
+    (map-set delegation-power delegate (+ current-power u1))
+    (ok true)
+  )
+)
+
+(define-public (revoke-delegation)
+  (let
+    (
+      (delegator tx-sender)
+      (delegation (unwrap! (map-get? delegations delegator) err-delegate-not-found))
+      (delegate (get delegate delegation))
+      (current-power (default-to u0 (map-get? delegation-power delegate)))
+    )
+    (map-delete delegations delegator)
+    (if (> current-power u0)
+      (map-set delegation-power delegate (- current-power u1))
+      true
+    )
+    (ok true)
+  )
+)
+
+
+
+(define-read-only (get-delegation (delegator principal))
+  (map-get? delegations delegator)
+)
+
+(define-read-only (get-delegation-power (delegate principal))
+  (default-to u0 (map-get? delegation-power delegate))
+)
+
+(define-read-only (get-voting-power (voter principal))
+  (+ (get-voter-token-count voter) (get-delegation-power voter))
 )
 
 (define-read-only (get-contract-stats)
