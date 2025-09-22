@@ -19,9 +19,12 @@
 (define-constant err-self-delegation (err u108))
 (define-constant err-delegate-not-found (err u109))
 (define-constant err-delegation-loop (err u110))
+(define-constant err-quorum-not-met (err u111))
+(define-constant err-invalid-quorum (err u112))
 
 (define-data-var last-token-id uint u0)
 (define-data-var proposal-counter uint u0)
+(define-data-var default-quorum-percentage uint u25)
 
 (define-map token-count principal uint)
 (define-map proposals 
@@ -34,7 +37,9 @@
     end-block: uint,
     yes-votes: uint,
     no-votes: uint,
-    status: (string-ascii 20)
+    status: (string-ascii 20),
+    quorum-percentage: uint,
+    total-eligible-voters: uint
   }
 )
 
@@ -112,6 +117,7 @@
       (proposal-id (+ (var-get proposal-counter) u1))
       (start-block stacks-block-height)
       (end-block (+ stacks-block-height voting-duration))
+      (eligible-voters (var-get last-token-id))
     )
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
     (map-set proposals proposal-id {
@@ -122,7 +128,9 @@
       end-block: end-block,
       yes-votes: u0,
       no-votes: u0,
-      status: "active"
+      status: "active",
+      quorum-percentage: (var-get default-quorum-percentage),
+      total-eligible-voters: eligible-voters
     })
     (var-set proposal-counter proposal-id)
     (ok proposal-id)
@@ -159,10 +167,12 @@
       (proposal (unwrap! (map-get? proposals proposal-id) err-proposal-not-found))
       (current-block stacks-block-height)
       (total-votes (+ (get yes-votes proposal) (get no-votes proposal)))
+      (required-votes (/ (* (get total-eligible-voters proposal) (get quorum-percentage proposal)) u100))
     )
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
     (asserts! (> current-block (get end-block proposal)) err-proposal-active)
     (asserts! (is-eq (get status proposal) "active") err-voting-ended)
+    (asserts! (>= total-votes required-votes) err-quorum-not-met)
     
     (let
       (
@@ -220,16 +230,28 @@
 (define-read-only (get-proposal-stats (proposal-id uint))
   (match (map-get? proposals proposal-id)
     proposal 
-    (ok {
-      total-votes: (+ (get yes-votes proposal) (get no-votes proposal)),
-      yes-percentage: (if (> (+ (get yes-votes proposal) (get no-votes proposal)) u0)
-                        (/ (* (get yes-votes proposal) u100) (+ (get yes-votes proposal) (get no-votes proposal)))
-                        u0),
-      status: (get status proposal),
-      blocks-remaining: (if (> (get end-block proposal) stacks-block-height)
-                          (- (get end-block proposal) stacks-block-height)
-                          u0)
-    })
+    (let
+      (
+        (total-votes (+ (get yes-votes proposal) (get no-votes proposal)))
+        (required-votes (/ (* (get total-eligible-voters proposal) (get quorum-percentage proposal)) u100))
+      )
+      (ok {
+        total-votes: total-votes,
+        yes-percentage: (if (> total-votes u0)
+                          (/ (* (get yes-votes proposal) u100) total-votes)
+                          u0),
+        status: (get status proposal),
+        blocks-remaining: (if (> (get end-block proposal) stacks-block-height)
+                            (- (get end-block proposal) stacks-block-height)
+                            u0),
+        quorum-percentage: (get quorum-percentage proposal),
+        required-votes: required-votes,
+        quorum-met: (>= total-votes required-votes),
+        participation-rate: (if (> (get total-eligible-voters proposal) u0)
+                              (/ (* total-votes u100) (get total-eligible-voters proposal))
+                              u0)
+      })
+    )
     err-proposal-not-found
   )
 )
@@ -322,6 +344,49 @@
   )
 )
 
+(define-public (set-default-quorum (percentage uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (<= percentage u100) err-invalid-quorum)
+    (asserts! (>= percentage u1) err-invalid-quorum)
+    (var-set default-quorum-percentage percentage)
+    (ok true)
+  )
+)
+
+(define-public (create-proposal-with-quorum
+  (title (string-ascii 100))
+  (description (string-ascii 500))
+  (voting-duration uint)
+  (quorum-percentage uint)
+)
+  (let
+    (
+      (proposal-id (+ (var-get proposal-counter) u1))
+      (start-block stacks-block-height)
+      (end-block (+ stacks-block-height voting-duration))
+      (eligible-voters (var-get last-token-id))
+    )
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (<= quorum-percentage u100) err-invalid-quorum)
+    (asserts! (>= quorum-percentage u1) err-invalid-quorum)
+    (map-set proposals proposal-id {
+      title: title,
+      description: description,
+      creator: tx-sender,
+      start-block: start-block,
+      end-block: end-block,
+      yes-votes: u0,
+      no-votes: u0,
+      status: "active",
+      quorum-percentage: quorum-percentage,
+      total-eligible-voters: eligible-voters
+    })
+    (var-set proposal-counter proposal-id)
+    (ok proposal-id)
+  )
+)
+
 
 
 (define-read-only (get-delegation (delegator principal))
@@ -340,6 +405,51 @@
   (ok {
     total-nfts-minted: (var-get last-token-id),
     total-proposals: (var-get proposal-counter),
-    contract-owner: contract-owner
+    contract-owner: contract-owner,
+    default-quorum-percentage: (var-get default-quorum-percentage)
   })
+)
+
+(define-read-only (get-quorum-info (proposal-id uint))
+  (match (map-get? proposals proposal-id)
+    proposal
+    (let
+      (
+        (total-votes (+ (get yes-votes proposal) (get no-votes proposal)))
+        (required-votes (/ (* (get total-eligible-voters proposal) (get quorum-percentage proposal)) u100))
+      )
+      (ok {
+        quorum-percentage: (get quorum-percentage proposal),
+        total-eligible-voters: (get total-eligible-voters proposal),
+        required-votes: required-votes,
+        current-votes: total-votes,
+        quorum-met: (>= total-votes required-votes),
+        votes-needed: (if (>= total-votes required-votes) u0 (- required-votes total-votes))
+      })
+    )
+    err-proposal-not-found
+  )
+)
+
+(define-read-only (check-proposal-validity (proposal-id uint))
+  (match (map-get? proposals proposal-id)
+    proposal
+    (let
+      (
+        (current-block stacks-block-height)
+        (total-votes (+ (get yes-votes proposal) (get no-votes proposal)))
+        (required-votes (/ (* (get total-eligible-voters proposal) (get quorum-percentage proposal)) u100))
+        (voting-ended (> current-block (get end-block proposal)))
+        (quorum-met (>= total-votes required-votes))
+      )
+      (ok {
+        is-active: (and (is-eq (get status proposal) "active") (not voting-ended)),
+        voting-ended: voting-ended,
+        quorum-met: quorum-met,
+        can-finalize: (and voting-ended quorum-met (is-eq (get status proposal) "active")),
+        will-fail-quorum: (and voting-ended (not quorum-met))
+      })
+    )
+    err-proposal-not-found
+  )
 )
