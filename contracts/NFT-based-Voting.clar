@@ -21,10 +21,12 @@
 (define-constant err-delegation-loop (err u110))
 (define-constant err-quorum-not-met (err u111))
 (define-constant err-invalid-quorum (err u112))
+(define-constant err-contract-paused (err u113))
 
 (define-data-var last-token-id uint u0)
 (define-data-var proposal-counter uint u0)
 (define-data-var default-quorum-percentage uint u25)
+(define-data-var contract-paused bool false)
 
 (define-map token-count principal uint)
 (define-map proposals 
@@ -119,6 +121,7 @@
       (end-block (+ stacks-block-height voting-duration))
       (eligible-voters (var-get last-token-id))
     )
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
     (map-set proposals proposal-id {
       title: title,
@@ -145,6 +148,7 @@
       (current-block stacks-block-height)
       (vote-power (+ u1 (default-to u0 (map-get? delegation-power voter))))
     )
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
     (asserts! (is-eq (some voter) (nft-get-owner? school-voter-nft token-id)) err-not-token-owner)
     (asserts! (>= current-block (get start-block proposal)) err-voting-ended)
     (asserts! (<= current-block (get end-block proposal)) err-voting-ended)
@@ -299,6 +303,7 @@
       (delegator tx-sender)
       (current-power (default-to u0 (map-get? delegation-power delegate)))
     )
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
     (asserts! (not (is-eq delegator delegate)) err-self-delegation)
     (asserts! (> (get-voter-token-count delegator) u0) err-not-token-owner)
     (asserts! (is-some (map-get? voter-info delegate)) err-delegate-not-found)
@@ -367,6 +372,7 @@
       (end-block (+ stacks-block-height voting-duration))
       (eligible-voters (var-get last-token-id))
     )
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
     (asserts! (<= quorum-percentage u100) err-invalid-quorum)
     (asserts! (>= quorum-percentage u1) err-invalid-quorum)
@@ -452,4 +458,24 @@
     )
     err-proposal-not-found
   )
+)
+
+(define-public (pause-contract)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (var-set contract-paused true)
+    (ok true)
+  )
+)
+
+(define-public (unpause-contract)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (var-set contract-paused false)
+    (ok true)
+  )
+)
+
+(define-read-only (is-contract-paused)
+  (ok (var-get contract-paused))
 )
