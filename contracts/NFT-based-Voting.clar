@@ -22,6 +22,7 @@
 (define-constant err-quorum-not-met (err u111))
 (define-constant err-invalid-quorum (err u112))
 (define-constant err-contract-paused (err u113))
+(define-constant err-invalid-tier (err u114))
 
 (define-data-var last-token-id uint u0)
 (define-data-var proposal-counter uint u0)
@@ -70,6 +71,26 @@
 (define-map delegation-power
   principal
   uint
+)
+
+(define-map voter-reputation
+  principal
+  {
+    total-votes-cast: uint,
+    proposals-created-voted: uint,
+    consecutive-votes: uint,
+    last-vote-proposal: uint,
+    reputation-points: uint
+  }
+)
+
+(define-map reputation-tiers
+  uint
+  {
+    tier-name: (string-ascii 20),
+    min-points: uint,
+    vote-weight-bonus: uint
+  }
 )
 
 (define-public (get-last-token-id)
@@ -478,4 +499,102 @@
 
 (define-read-only (is-contract-paused)
   (ok (var-get contract-paused))
+)
+
+(define-public (initialize-reputation-tiers)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (map-set reputation-tiers u1 {tier-name: "Newcomer", min-points: u0, vote-weight-bonus: u0})
+    (map-set reputation-tiers u2 {tier-name: "Participant", min-points: u10, vote-weight-bonus: u1})
+    (map-set reputation-tiers u3 {tier-name: "Active Voter", min-points: u50, vote-weight-bonus: u2})
+    (map-set reputation-tiers u4 {tier-name: "Community Leader", min-points: u100, vote-weight-bonus: u3})
+    (map-set reputation-tiers u5 {tier-name: "Champion", min-points: u250, vote-weight-bonus: u5})
+    (ok true)
+  )
+)
+
+(define-public (record-vote-reputation (voter principal) (proposal-id uint))
+  (let
+    (
+      (current-rep (default-to 
+        {total-votes-cast: u0, proposals-created-voted: u0, consecutive-votes: u0, last-vote-proposal: u0, reputation-points: u0}
+        (map-get? voter-reputation voter)))
+      (last-proposal (get last-vote-proposal current-rep))
+      (is-consecutive (is-eq last-proposal (- proposal-id u1)))
+      (new-consecutive (if is-consecutive (+ (get consecutive-votes current-rep) u1) u1))
+      (base-points u5)
+      (streak-bonus (if (>= new-consecutive u3) (* new-consecutive u2) u0))
+      (new-points (+ (get reputation-points current-rep) (+ base-points streak-bonus)))
+    )
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
+    (map-set voter-reputation voter {
+      total-votes-cast: (+ (get total-votes-cast current-rep) u1),
+      proposals-created-voted: (get proposals-created-voted current-rep),
+      consecutive-votes: new-consecutive,
+      last-vote-proposal: proposal-id,
+      reputation-points: new-points
+    })
+    (ok new-points)
+  )
+)
+
+(define-read-only (get-voter-reputation (voter principal))
+  (default-to 
+    {total-votes-cast: u0, proposals-created-voted: u0, consecutive-votes: u0, last-vote-proposal: u0, reputation-points: u0}
+    (map-get? voter-reputation voter))
+)
+
+(define-read-only (get-voter-tier (voter principal))
+  (let
+    (
+      (rep (get-voter-reputation voter))
+      (points (get reputation-points rep))
+    )
+    (if (>= points u250)
+      (map-get? reputation-tiers u5)
+      (if (>= points u100)
+        (map-get? reputation-tiers u4)
+        (if (>= points u50)
+          (map-get? reputation-tiers u3)
+          (if (>= points u10)
+            (map-get? reputation-tiers u2)
+            (map-get? reputation-tiers u1)
+          )
+        )
+      )
+    )
+  )
+)
+
+(define-read-only (get-reputation-tier-info (tier-id uint))
+  (map-get? reputation-tiers tier-id)
+)
+
+(define-read-only (get-effective-voting-power (voter principal))
+  (let
+    (
+      (base-power (get-voting-power voter))
+      (tier (get-voter-tier voter))
+    )
+    (match tier
+      tier-info (+ base-power (get vote-weight-bonus tier-info))
+      base-power
+    )
+  )
+)
+
+(define-read-only (get-voter-reputation-summary (voter principal))
+  (let
+    (
+      (rep (get-voter-reputation voter))
+      (tier (get-voter-tier voter))
+    )
+    (ok {
+      total-votes: (get total-votes-cast rep),
+      consecutive-votes: (get consecutive-votes rep),
+      reputation-points: (get reputation-points rep),
+      current-tier: tier,
+      effective-voting-power: (get-effective-voting-power voter)
+    })
+  )
 )
